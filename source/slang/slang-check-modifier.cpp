@@ -1938,6 +1938,31 @@ Modifier* SemanticsVisitor::checkModifier(
     ModifiableSyntaxNode* syntaxNode,
     bool ignoreUnallowedModifier)
 {
+    if (auto mslConditionalModifier = as<MSLConditionalModifier>(m))
+    {
+        if (mslConditionalModifier->condition)
+        {
+            mslConditionalModifier->condition = CheckTerm(mslConditionalModifier->condition);
+            mslConditionalModifier->condition = coerceToBoolForMSLProperty(
+                CoercionSite::General,
+                mslConditionalModifier->condition,
+                getSink());
+        }
+        return mslConditionalModifier;
+    }
+
+    if (auto mslTechniqueModifier = as<MSLTechniqueModifier>(m))
+    {
+        for (auto& condition : mslTechniqueModifier->conditions)
+        {
+            condition = CheckTerm(condition);
+            condition = coerceToBoolForMSLProperty(CoercionSite::General, condition, getSink());
+        }
+        for (auto& boundValue : mslTechniqueModifier->boundValues)
+            boundValue = CheckTerm(boundValue);
+        return mslTechniqueModifier;
+    }
+
     if (auto hlslUncheckedAttribute = as<UncheckedAttribute>(m))
     {
         // We have an HLSL `[name(arg,...)]` attribute, and we'd like

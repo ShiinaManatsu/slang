@@ -1,4 +1,5 @@
 #include "slang-language-server-document-symbols.h"
+#include "slang-ast-print.h"
 
 namespace Slang
 {
@@ -12,6 +13,21 @@ struct GetDocumentSymbolContext
 
 static LanguageServerProtocol::SymbolKind _getSymbolKind(Decl* decl)
 {
+    // A source-level `cbuffer` is lowered to a transparent ConstantBuffer<T>
+    // variable plus an implicit struct T. Expose the variable as a container
+    // so document symbols follow the declaration the user actually wrote.
+    if (auto varDecl = as<VarDeclBase>(decl))
+    {
+        if (varDecl->hasModifier<ImplicitParameterGroupVariableModifier>() &&
+            as<ConstantBufferType>(varDecl->type))
+        {
+            return LanguageServerProtocol::kSymbolKindNamespace;
+        }
+    }
+    if (decl->hasModifier<ImplicitParameterGroupElementTypeModifier>())
+    {
+        return -1;
+    }
     if (as<StructDecl>(decl))
     {
         return LanguageServerProtocol::kSymbolKindStruct;
@@ -68,6 +84,10 @@ static LanguageServerProtocol::SymbolKind _getSymbolKind(Decl* decl)
     {
         return LanguageServerProtocol::kSymbolKindEnumMember;
     }
+    if (decl->findModifier<MSLTechniqueModifier>())
+    {
+        return LanguageServerProtocol::kSymbolKindObject;
+    }
     if (as<NamespaceDecl>(decl))
     {
         return LanguageServerProtocol::kSymbolKindNamespace;
@@ -82,6 +102,38 @@ static LanguageServerProtocol::SymbolKind _getSymbolKind(Decl* decl)
     }
     return -1;
 }
+
+static StructDecl* _getCBufferElementType(Decl* decl)
+{
+    auto varDecl = as<VarDeclBase>(decl);
+    if (!varDecl || !varDecl->hasModifier<ImplicitParameterGroupVariableModifier>())
+        return nullptr;
+
+    auto cbufferType = as<ConstantBufferType>(varDecl->type);
+    if (!cbufferType)
+        return nullptr;
+
+    auto elementType = as<DeclRefType>(cbufferType->getElementType());
+    return elementType ? as<StructDecl>(elementType->getDeclRef().getDecl()) : nullptr;
+}
+
+static String _getDocumentSymbolDetail(Decl* decl, ASTBuilder* astBuilder)
+{
+    auto varDecl = as<VarDeclBase>(decl);
+    if (!varDecl || !varDecl->parentDecl ||
+        !varDecl->parentDecl->hasModifier<ImplicitParameterGroupElementTypeModifier>() ||
+        !varDecl->type.type)
+    {
+        return String();
+    }
+
+    ASTPrinter printer(
+        astBuilder,
+        ASTPrinter::OptionFlag::NoInternalKeywords | ASTPrinter::OptionFlag::SimplifiedBuiltinType);
+    printer.addType(varDecl->type.type);
+    return printer.getString();
+}
+
 static SourceLoc _findClosingSourceLoc(Decl* decl)
 {
     if (auto func = as<FunctionDeclBase>(decl))
@@ -104,6 +156,10 @@ static SourceLoc _findClosingSourceLoc(Decl* decl)
     {
         return container->closingSourceLoc;
     }
+    if (auto cbufferElementType = _getCBufferElementType(decl))
+    {
+        return cbufferElementType->closingSourceLoc;
+    }
     return SourceLoc();
 }
 
@@ -121,11 +177,142 @@ static NameLoc _getDeclRefExprNameLoc(Expr* expr)
 }
 static NameLoc _getDeclNameLoc(Decl* decl)
 {
+    if (auto varDecl = as<VarDeclBase>(decl))
+    {
+        if (varDecl->hasModifier<ImplicitParameterGroupVariableModifier>())
+        {
+            if (auto reflectionName = decl->findModifier<ParameterGroupReflectionName>())
+                return reflectionName->nameAndLoc;
+        }
+    }
     if (auto extDecl = as<ExtensionDecl>(decl))
     {
         return _getDeclRefExprNameLoc(extDecl->targetType.exp);
     }
+    if (auto techniqueModifier = decl->findModifier<MSLTechniqueModifier>())
+    {
+        if (techniqueModifier->nameToken.type == TokenType::Identifier)
+            return NameLoc(techniqueModifier->nameToken);
+    }
     return decl->nameAndLoc;
+}
+
+static bool _isInCurrentDocument(
+    GetDocumentSymbolContext& context,
+    const HumaneSourceLoc& humaneLoc)
+{
+    return humaneLoc.line != 0 &&
+           context.fileName.endsWithCaseInsensitive(
+               Path::getFileName(humaneLoc.pathInfo.foundPath).getUnownedSlice());
+}
+
+static SourceLoc _findCBufferMacroInvocationLoc(
+    GetDocumentSymbolContext& context,
+    Decl* cbufferDecl,
+    VarDeclBase* memberDecl)
+{
+    auto sourceManager = context.linkage->getSourceManager();
+    auto memberNameLoc = _getDeclNameLoc(memberDecl);
+    if (!memberNameLoc.name || !memberNameLoc.loc.isValid())
+        return SourceLoc();
+
+    auto cbufferNameLoc = _getDeclNameLoc(cbufferDecl);
+    auto cbufferStart = sourceManager->getHumaneLoc(cbufferNameLoc.loc, SourceLocType::Actual);
+    auto cbufferEndLoc = _findClosingSourceLoc(cbufferDecl);
+    auto cbufferEnd = sourceManager->getHumaneLoc(cbufferEndLoc, SourceLocType::Actual);
+    if (!_isInCurrentDocument(context, cbufferStart) || !_isInCurrentDocument(context, cbufferEnd))
+        return SourceLoc();
+
+    auto& preprocessorInfo = context.linkage->contentAssistInfo.preprocessorInfo;
+    for (auto& definition : preprocessorInfo.macroDefinitions)
+    {
+        if (!definition.name)
+            continue;
+
+        bool definesMember = false;
+        for (auto& token : definition.tokenList)
+        {
+            if (token.loc == memberNameLoc.loc && token.getNameOrNull() == memberNameLoc.name)
+            {
+                definesMember = true;
+                break;
+            }
+        }
+        if (!definesMember)
+            continue;
+
+        for (auto& invocation : preprocessorInfo.macroInvocations)
+        {
+            if (invocation.name != definition.name)
+                continue;
+
+            auto invocationLoc = sourceManager->getHumaneLoc(invocation.loc, SourceLocType::Actual);
+            if (!_isInCurrentDocument(context, invocationLoc))
+                continue;
+            if (invocationLoc.line < cbufferStart.line || invocationLoc.line > cbufferEnd.line)
+                continue;
+
+            return invocation.loc;
+        }
+    }
+    return SourceLoc();
+}
+
+static void _getCBufferMemberSymbols(
+    GetDocumentSymbolContext& context,
+    Decl* cbufferDecl,
+    StructDecl* cbufferElementType,
+    List<LanguageServerProtocol::DocumentSymbol>& childSymbols)
+{
+    auto srcManager = context.linkage->getSourceManager();
+    for (auto member : cbufferElementType->getDirectMemberDecls())
+    {
+        if (auto genericDecl = as<GenericDecl>(member))
+            member = genericDecl->inner;
+        if (!as<VarDeclBase>(member))
+            continue;
+
+        NameLoc nameLoc = _getDeclNameLoc(member);
+        if (!nameLoc.name || nameLoc.name->text.getLength() == 0 || !nameLoc.loc.isValid())
+            continue;
+        if (member->hasModifier<SynthesizedModifier>() ||
+            member->hasModifier<ToBeSynthesizedModifier>())
+        {
+            continue;
+        }
+
+        SourceLoc symbolLoc = nameLoc.loc;
+        auto humaneLoc = srcManager->getHumaneLoc(symbolLoc, SourceLocType::Actual);
+        if (!_isInCurrentDocument(context, humaneLoc))
+        {
+            symbolLoc = _findCBufferMacroInvocationLoc(context, cbufferDecl, as<VarDeclBase>(member));
+            humaneLoc = srcManager->getHumaneLoc(symbolLoc, SourceLocType::Actual);
+        }
+        if (!_isInCurrentDocument(context, humaneLoc))
+        {
+            continue;
+        }
+
+        LanguageServerProtocol::DocumentSymbol symbol;
+        symbol.name = nameLoc.name->text;
+        symbol.kind = LanguageServerProtocol::kSymbolKindField;
+        symbol.detail = _getDocumentSymbolDetail(member, context.linkage->getASTBuilder());
+        Index line, col;
+        context.doc->oneBasedUTF8LocToZeroBasedUTF16Loc(
+            humaneLoc.line,
+            humaneLoc.column,
+            line,
+            col);
+        symbol.selectionRange.start.line = (int)line;
+        symbol.selectionRange.start.character = (int)col;
+        symbol.selectionRange.end.line = (int)line;
+        symbol.selectionRange.end.character =
+            (int)(col + (int)UTF8Util::calcUTF16CharCount(nameLoc.name->text.getUnownedSlice()));
+        symbol.range.start.line = (int)line;
+        symbol.range.start.character = 0;
+        symbol.range.end = symbol.selectionRange.end;
+        childSymbols.add(_Move(symbol));
+    }
 }
 
 static void _getDocumentSymbolsImpl(
@@ -167,6 +354,9 @@ static void _getDocumentSymbolsImpl(
             LanguageServerProtocol::DocumentSymbol sym;
             sym.name = nameLoc.name->text;
             sym.kind = kind;
+            sym.detail = _getDocumentSymbolDetail(child, context.linkage->getASTBuilder());
+            if (_getCBufferElementType(child))
+                sym.detail = "cbuffer";
             Index line, col;
             context.doc
                 ->oneBasedUTF8LocToZeroBasedUTF16Loc(humaneLoc.line, humaneLoc.column, line, col);
@@ -206,7 +396,13 @@ static void _getDocumentSymbolsImpl(
                     sym.selectionRange.end = sym.range.end;
                 }
             }
-            if (const auto childContainerDecl = as<ContainerDecl>(child); childContainerDecl)
+            if (auto cbufferElementType = _getCBufferElementType(child))
+            {
+                // The transparent cbuffer variable is an empty container. Its
+                // source members live on the implicit element struct instead.
+                _getCBufferMemberSymbols(context, child, cbufferElementType, sym.children);
+            }
+            else if (const auto childContainerDecl = as<ContainerDecl>(child); childContainerDecl)
             {
                 // Recurse
                 bool shouldRecurse = true;

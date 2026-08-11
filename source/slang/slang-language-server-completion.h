@@ -44,6 +44,9 @@ struct CompletionContext
     Int col;
     String indent;
 
+    // Whether this request replaces an MSL property prefix such as `@_Feature`.
+    bool isMSLPropertyCompletion = false;
+
     // The token range of original request, in 0-based UTF16 code units.
     LanguageServerProtocol::Range requestRange;
     LanguageServerResult<CompletionResult> tryCompleteMemberAndSymbol();

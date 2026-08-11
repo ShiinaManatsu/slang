@@ -152,6 +152,7 @@ SlangResult LanguageServer::parseNextMessage()
                     caps.completionProvider.triggerCharacters.add(">");
                     caps.completionProvider.triggerCharacters.add(":");
                     caps.completionProvider.triggerCharacters.add("[");
+                    caps.completionProvider.triggerCharacters.add("@");
                     caps.completionProvider.triggerCharacters.add(" ");
                     caps.completionProvider.triggerCharacters.add("(");
                     caps.completionProvider.triggerCharacters.add("\"");
@@ -166,6 +167,8 @@ SlangResult LanguageServer::parseNextMessage()
                     caps.signatureHelpProvider.retriggerCharacters.add(",");
                     for (auto tokenType : kSemanticTokenTypes)
                         caps.semanticTokensProvider.legend.tokenTypes.add(tokenType);
+                    for (auto tokenModifier : kSemanticTokenModifiers)
+                        caps.semanticTokensProvider.legend.tokenModifiers.add(tokenModifier);
                 };
                 ServerInfo serverInfo;
                 serverInfo.name = "SlangLanguageServer";
@@ -535,6 +538,66 @@ static void _tryGetDocumentation(StringBuilder& sb, WorkspaceVersion* workspace,
     }
 }
 
+// Append the token-preserved MSL property body without assigning semantic meaning to its values.
+static void _appendMSLPropertyMetadata(StringBuilder& sb, VarDeclBase* propertyDecl)
+{
+    auto propertyModifier = propertyDecl->findModifier<MSLPropertyModifier>();
+    if (!propertyModifier || propertyModifier->isSynthetic)
+        return;
+
+    struct MetadataEntry
+    {
+        String key;
+        String value;
+    };
+    List<MetadataEntry> entries;
+    auto& tokens = propertyModifier->metadataTokens;
+    for (Index tokenIndex = 0; tokenIndex < tokens.getCount();)
+    {
+        if (tokens[tokenIndex].type == TokenType::Semicolon)
+        {
+            tokenIndex++;
+            continue;
+        }
+
+        auto keyToken = tokens[tokenIndex++];
+        if (tokenIndex >= tokens.getCount() || tokens[tokenIndex].type != TokenType::OpAssign)
+        {
+            while (tokenIndex < tokens.getCount() && tokens[tokenIndex].type != TokenType::Semicolon)
+                tokenIndex++;
+            continue;
+        }
+        tokenIndex++;
+
+        StringBuilder valueBuilder;
+        while (tokenIndex < tokens.getCount() && tokens[tokenIndex].type != TokenType::Semicolon)
+        {
+            if (valueBuilder.getLength())
+                valueBuilder << " ";
+            valueBuilder << tokens[tokenIndex++].getContent();
+        }
+        if (tokenIndex < tokens.getCount())
+            tokenIndex++;
+
+        if (keyToken.getContentLength() && valueBuilder.getLength())
+        {
+            MetadataEntry entry;
+            entry.key = keyToken.getContent();
+            entry.value = valueBuilder.produceString();
+            entries.add(_Move(entry));
+        }
+    }
+
+    if (!propertyModifier->valueCountToken.getContentLength() && entries.getCount() == 0)
+        return;
+
+    sb << "\n**MSL metadata**\n";
+    if (propertyModifier->valueCountToken.getContentLength())
+        sb << "- Value count: `" << propertyModifier->valueCountToken.getContent() << "`\n";
+    for (auto& entry : entries)
+        sb << "- " << entry.key << ": " << entry.value << "\n";
+}
+
 void appendDefinitionLocation(StringBuilder& sb, Workspace* workspace, const HumaneSourceLoc& loc)
 {
     auto path = loc.pathInfo.foundPath;
@@ -700,6 +763,8 @@ LanguageServerResult<LanguageServerProtocol::Hover> LanguageServerCore::hover(
             sb << "```\n" << getDeclSignatureString(declRef, version) << "\n```\n";
 
             _tryGetDocumentation(sb, version, declRef.getDecl());
+            if (auto propertyDecl = as<VarDeclBase>(declRef.getDecl()))
+                _appendMSLPropertyMetadata(sb, propertyDecl);
 
             if (auto funcDecl = as<FunctionDeclBase>(declRef.getDecl()))
             {
@@ -1260,6 +1325,77 @@ SlangResult LanguageServer::completion(
     return SLANG_OK;
 }
 
+static bool _hasCompletionRequestToken(UnparsedStmt* stmt)
+{
+    for (auto token : stmt->tokens)
+    {
+        if (token.type == TokenType::CompletionRequest)
+            return true;
+    }
+    return false;
+}
+
+// Finds the lazy function body that contains the language server completion token.
+//
+// Consider this example:
+//
+//     void shade(float value)
+//     {
+//         value = #?;
+//     }
+//
+// The initial parser stores function bodies as `UnparsedStmt` nodes to avoid eagerly checking
+// every body in a workspace. When `shade` is otherwise unreachable, normal semantic checking marks
+// its body as skipped, but the parser has already preserved the scope containing `value` on the
+// `UnparsedStmt`. Completion can use that scope directly without parsing or checking the body.
+static bool _findCompletionRequestBody(
+    Decl* decl,
+    FunctionDeclBase*& outFunction,
+    UnparsedStmt*& outBody)
+{
+    if (auto funcDecl = as<FunctionDeclBase>(decl))
+    {
+        if (auto body = as<UnparsedStmt>(funcDecl->body))
+        {
+            if (_hasCompletionRequestToken(body))
+            {
+                outFunction = funcDecl;
+                outBody = body;
+                return true;
+            }
+        }
+    }
+
+    if (auto containerDecl = as<ContainerDecl>(decl))
+    {
+        for (auto member : containerDecl->getDirectMemberDecls())
+        {
+            if (_findCompletionRequestBody(member, outFunction, outBody))
+                return true;
+        }
+    }
+    return false;
+}
+
+static void _completeUnparsedBody(WorkspaceVersion* version, Module* module)
+{
+    FunctionDeclBase* function = nullptr;
+    UnparsedStmt* body = nullptr;
+    if (!_findCompletionRequestBody(module->getModuleDecl(), function, body))
+        return;
+
+    DiagnosticSink sink;
+    SharedSemanticsContext semanticContext(version->linkage, module, &sink);
+    SemanticsContext context(&semanticContext);
+    context = context.withParentFunc(function);
+    SemanticsVisitor semanticsVisitor(context);
+    auto completionExpr = version->linkage->getASTBuilder()->create<VarExpr>();
+    completionExpr->loc = body->loc;
+    completionExpr->name = version->linkage->getSessionImpl()->getCompletionRequestTokenName();
+    completionExpr->scope = body->currentScope;
+    semanticsVisitor.CheckTerm(completionExpr);
+}
+
 LanguageServerResult<CompletionResult> LanguageServerCore::completion(
     const LanguageServerProtocol::CompletionParams& args)
 {
@@ -1306,11 +1442,30 @@ LanguageServerResult<CompletionResult> LanguageServerCore::completion(
 
     // Ajust cursor position to the beginning of the current/last identifier.
     Index firstTokenCharOffset = cursorOffset;
+    const Index completionCursorOffset = cursorOffset;
     cursorOffset--;
     while (cursorOffset > 0 && _isIdentifierChar(doc->getText()[cursorOffset]))
     {
         firstTokenCharOffset = cursorOffset;
         cursorOffset--;
+    }
+
+    Index completionTokenOffset = cursorOffset + 1;
+    bool isMSLPropertyCompletion = false;
+    if (cursorOffset >= 0 && doc->getText()[cursorOffset] == '@')
+    {
+        const Index propertyNameOffset = cursorOffset + 1;
+        const bool hasPropertyPrefix =
+            propertyNameOffset < doc->getText().getLength() &&
+            doc->getText()[propertyNameOffset] == '_' &&
+            firstTokenCharOffset == propertyNameOffset;
+        const bool hasEmptyPropertyPrefix = completionCursorOffset == propertyNameOffset;
+        if (hasPropertyPrefix || hasEmptyPropertyPrefix)
+        {
+            isMSLPropertyCompletion = true;
+            firstTokenCharOffset = cursorOffset;
+            completionTokenOffset = cursorOffset;
+        }
     }
 
     // Never show suggestions when the user is typing a number.
@@ -1336,6 +1491,7 @@ LanguageServerResult<CompletionResult> LanguageServerCore::completion(
     context.canonicalPath = canonicalPath.getUnownedSlice();
     context.line = utf8Line;
     context.col = utf8Col;
+    context.isMSLPropertyCompletion = isMSLPropertyCompletion;
     Int firstNonWhiteSpace = 0;
     auto lineContent = doc->getLine(utf8Line);
     while (firstNonWhiteSpace < lineContent.getLength() &&
@@ -1350,6 +1506,8 @@ LanguageServerResult<CompletionResult> LanguageServerCore::completion(
         context.requestRange.start.character);
 
     auto utf8TokenLen = doc->getTokenLength(firstTokenCharOffset);
+    if (isMSLPropertyCompletion)
+        utf8TokenLen = 1 + doc->getTokenLength(firstTokenCharOffset + 1);
     doc->oneBasedUTF8LocToZeroBasedUTF16Loc(
         utf8Line,
         utf8Col + utf8TokenLen,
@@ -1381,8 +1539,8 @@ LanguageServerResult<CompletionResult> LanguageServerCore::completion(
     // Insert a completion request token at cursor position.
     auto originalText = doc->getText();
     StringBuilder newText;
-    newText << originalText.getUnownedSlice().head(cursorOffset + 1) << "#?"
-            << originalText.getUnownedSlice().tail(cursorOffset + 1);
+    newText << originalText.getUnownedSlice().head(completionTokenOffset) << "#?"
+            << originalText.getUnownedSlice().tail(completionTokenOffset);
     doc->setText(newText.produceString());
     auto restoreDocText = makeDeferred([&]() { doc->setText(originalText); });
 
@@ -1390,6 +1548,12 @@ LanguageServerResult<CompletionResult> LanguageServerCore::completion(
     if (!parsedModule)
     {
         return std::nullopt;
+    }
+
+    if (version->linkage->contentAssistInfo.completionSuggestions.scopeKind ==
+        CompletionSuggestions::ScopeKind::Invalid)
+    {
+        _completeUnparsedBody(version, parsedModule);
     }
 
     context.parsedModule = parsedModule;

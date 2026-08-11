@@ -32,6 +32,9 @@ public:
     // are assumed to be written
     SourceLanguage sourceLanguage = SourceLanguage::Unknown;
 
+    // Enables Messiah MSL compatibility syntax on top of HLSL parsing.
+    bool isMessiahShader = false;
+
     /// Makes any source artifact available as a SourceFile.
     /// If successful any of the source artifacts will be represented by the same index
     /// of sourceArtifacts

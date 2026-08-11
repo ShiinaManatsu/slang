@@ -22,11 +22,17 @@ const char* kSemanticTokenTypes[] = {
     "macro",
     "string"};
 
+const char* kSemanticTokenModifiers[] = {"global", "local", "field"};
+
 static const int kInitTokenLegnth = 6;
 
 static_assert(
     SLANG_COUNT_OF(kSemanticTokenTypes) == (int)SemanticTokenType::NormalText,
     "kSemanticTokenTypes must match SemanticTokenType");
+
+static_assert(
+    SLANG_COUNT_OF(kSemanticTokenModifiers) == (int)SemanticTokenModifier::Count,
+    "kSemanticTokenModifiers must match SemanticTokenModifier");
 
 SemanticToken _createSemanticToken(SourceManager* manager, SourceLoc loc, Name* name)
 {
@@ -45,12 +51,49 @@ bool isHighlightableName(Name* name)
 {
     if (!name)
         return false;
-    for (auto ch : name->text)
+    auto text = name->text.getUnownedSlice();
+    Index startIndex = 0;
+    if (text.startsWith("@_"))
+        startIndex = 2;
+    for (Index i = startIndex; i < text.getLength(); ++i)
     {
+        auto ch = text[i];
         if (!CharUtil::isAlphaOrDigit(ch) && ch != '_')
             return false;
     }
     return true;
+}
+
+// Classifies a variable from its resolved declaration ownership.
+//
+// Consider this example:
+//
+//     cbuffer Shader { float falloff; }
+//     float shade() { float local = falloff; return local; }
+//
+// `falloff` is desugared into a field of an implicit parameter-group element type, while `local`
+// belongs to `shade`. The modifier-based parameter-group check preserves that distinction without
+// relying on the generated type name.
+static uint32_t _getVariableScopeModifiers(VarDeclBase* varDecl)
+{
+    if (varDecl->hasModifier<ImplicitParameterGroupVariableModifier>())
+        return getSemanticTokenModifierMask(SemanticTokenModifier::Global);
+
+    for (auto parentDecl = varDecl->parentDecl; parentDecl; parentDecl = parentDecl->parentDecl)
+    {
+        if (auto aggregateDecl = as<AggTypeDeclBase>(parentDecl))
+        {
+            uint32_t result = getSemanticTokenModifierMask(SemanticTokenModifier::Field);
+            if (aggregateDecl->hasModifier<ImplicitParameterGroupElementTypeModifier>())
+                result |= getSemanticTokenModifierMask(SemanticTokenModifier::Global);
+            return result;
+        }
+        if (as<FunctionDeclBase>(parentDecl))
+            return getSemanticTokenModifierMask(SemanticTokenModifier::Local);
+        if (as<FileDecl>(parentDecl) || as<NamespaceDeclBase>(parentDecl))
+            return getSemanticTokenModifierMask(SemanticTokenModifier::Global);
+    }
+    return 0;
 }
 
 List<SemanticToken> getSemanticTokens(
@@ -68,7 +111,7 @@ List<SemanticToken> getSemanticTokens(
             token.type != SemanticTokenType::NormalText)
             result.add(token);
     };
-    auto handleDeclRef = [&](DeclRef<Decl> declRef, Expr* originalExpr, Name* name, SourceLoc loc)
+    auto handleDeclRef = [&](DeclRef<Decl> declRef, Expr*, Name* name, SourceLoc loc)
     {
         if (!declRef)
             return;
@@ -116,13 +159,14 @@ List<SemanticToken> getSemanticTokens(
         {
             token.type = SemanticTokenType::Parameter;
         }
-        else if (as<VarDecl>(target))
+        else if (target->hasModifier<MSLPropertyModifier>())
         {
-            if (as<MemberExpr>(originalExpr) || as<StaticMemberExpr>(originalExpr))
-            {
-                return;
-            }
+            token.type = SemanticTokenType::Property;
+        }
+        else if (auto varDecl = as<VarDeclBase>(target))
+        {
             token.type = SemanticTokenType::Variable;
+            token.modifiers = _getVariableScopeModifiers(varDecl);
         }
         else if (as<FunctionDeclBase>(target))
         {
@@ -270,6 +314,7 @@ List<SemanticToken> getSemanticTokens(
                     SemanticToken token =
                         _createSemanticToken(manager, varDecl->getNameLoc(), varDecl->getName());
                     token.type = SemanticTokenType::Variable;
+                    token.modifiers = _getVariableScopeModifiers(varDecl);
                     maybeInsertToken(token);
                 }
             }
@@ -391,7 +436,7 @@ List<uint32_t> getEncodedTokens(List<SemanticToken>& tokens)
     result.add((uint32_t)tokens[0].col);
     result.add((uint32_t)tokens[0].length);
     result.add((uint32_t)tokens[0].type);
-    result.add(0);
+    result.add(tokens[0].modifiers);
 
     // Encode the rest tokens as deltas.
     uint32_t prevLine = (uint32_t)tokens[0].line;
@@ -410,7 +455,7 @@ List<uint32_t> getEncodedTokens(List<SemanticToken>& tokens)
         result.add(deltaCol);
         result.add((uint32_t)tokens[i].length);
         result.add((uint32_t)tokens[i].type);
-        result.add(0);
+        result.add(tokens[i].modifiers);
 
         prevLine = thisLine;
         prevCol = thisCol;

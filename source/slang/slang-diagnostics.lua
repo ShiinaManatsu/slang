@@ -1760,6 +1760,20 @@ warning(
     span { loc = "expr:Expr", message = "casting literal 0 to a struct type becomes a conversion in Slang 202c. To keep the current semantics, switch to a constructor with no parameters." }
 )
 
+err(
+    "msl-property-cannot-use-conditional-operator",
+    30088,
+    "MSL property cannot use `?:`",
+    span { loc = "expr:Expr", message = "MSL property expressions cannot use the `?:` operator" }
+)
+
+err(
+    "msl-property-expression-must-be-static",
+    30089,
+    "MSL property expression must be static",
+    span { loc = "expr:Expr", message = "MSL property expressions can only combine MSL properties with compile-time constants" }
+)
+
 -- try/throw diagnostics
 
 err(

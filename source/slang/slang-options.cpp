@@ -1713,6 +1713,7 @@ SlangSourceLanguage findSourceLanguageFromPath(const String& path, Stage& outImp
 
         {".hlsl", SLANG_SOURCE_LANGUAGE_HLSL, SLANG_STAGE_NONE},
         {".fx", SLANG_SOURCE_LANGUAGE_HLSL, SLANG_STAGE_NONE},
+        {".fxt", SLANG_SOURCE_LANGUAGE_HLSL, SLANG_STAGE_NONE},
 
         {".glsl", SLANG_SOURCE_LANGUAGE_GLSL, SLANG_STAGE_NONE},
         {".vert", SLANG_SOURCE_LANGUAGE_GLSL, SLANG_STAGE_VERTEX},

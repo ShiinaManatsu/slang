@@ -2678,6 +2678,12 @@ public:
     Result checkFuncRedeclaration(FuncDecl* newDecl, FuncDecl* oldDecl);
     void checkForRedeclaration(Decl* decl);
 
+    bool isMSLPropertyExpr(Expr* expr);
+    bool containsMSLPropertyExpr(Expr* expr);
+    bool isMSLStaticPropertyExpression(Expr* expr);
+    void checkMSLPropertyExpression(Expr* expr);
+    Expr* coerceToBoolForMSLProperty(CoercionSite site, Expr* expr, DiagnosticSink* sink);
+
     Expr* checkPredicateExpr(Expr* expr);
 
     Expr* checkExpressionAndExpectIntegerConstant(
