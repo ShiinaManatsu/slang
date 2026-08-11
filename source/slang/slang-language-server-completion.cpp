@@ -859,6 +859,8 @@ CompletionResult CompletionContext::collectMembersAndSymbols()
             continue;
         if (!member->getName())
             continue;
+        if (isMSLPropertyCompletion && !member->hasModifier<MSLPropertyModifier>())
+            continue;
         LanguageServerProtocol::CompletionItem item;
         int nameStart = 0;
         item.label = formatDeclForCompletion(
@@ -905,7 +907,7 @@ CompletionResult CompletionContext::collectMembersAndSymbols()
         }
         if (item.label.getLength() == 0)
             continue;
-        if (!_isIdentifierChar(item.label[0]))
+        if (!_isIdentifierChar(item.label[0]) && !member->hasModifier<MSLPropertyModifier>())
             continue;
         if (item.label.startsWith("$"))
             continue;
@@ -935,6 +937,10 @@ CompletionResult CompletionContext::collectMembersAndSymbols()
         else if (as<EnumDecl>(member))
         {
             item.kind = LanguageServerProtocol::kCompletionItemKindEnum;
+        }
+        else if (member->hasModifier<MSLPropertyModifier>())
+        {
+            item.kind = LanguageServerProtocol::kCompletionItemKindProperty;
         }
         else if (as<VarDeclBase>(member))
         {
@@ -975,7 +981,7 @@ CompletionResult CompletionContext::collectMembersAndSymbols()
             result.add(item);
         }
     }
-    if (addKeywords)
+    if (addKeywords && !isMSLPropertyCompletion)
     {
         if (linkage->contentAssistInfo.completionSuggestions.scopeKind ==
             CompletionSuggestions::ScopeKind::Decl)
@@ -1026,6 +1032,24 @@ CompletionResult CompletionContext::collectMembersAndSymbols()
             for (auto ch : getCommitChars())
                 item.commitCharacters.add(ch);
         }
+    }
+
+    if (isMSLPropertyCompletion)
+    {
+        List<LanguageServerProtocol::TextEditCompletionItem> textEditItems;
+        for (auto& item : result)
+        {
+            LanguageServerProtocol::TextEditCompletionItem textEditItem;
+            textEditItem.label = item.label;
+            textEditItem.kind = item.kind;
+            textEditItem.detail = item.detail;
+            textEditItem.documentation = item.documentation;
+            textEditItem.commitCharacters = item.commitCharacters;
+            textEditItem.textEdit.range = requestRange;
+            textEditItem.textEdit.newText = item.label;
+            textEditItems.add(_Move(textEditItem));
+        }
+        return CompletionResult(_Move(textEditItems));
     }
     return result;
 }

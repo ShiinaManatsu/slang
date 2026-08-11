@@ -888,6 +888,26 @@ bool _findAstNodeImpl(ASTLookupContext& context, SyntaxNode* node)
                         return true;
                 }
             }
+            else if (auto conditionalModifier = as<MSLConditionalModifier>(modifier))
+            {
+                ASTLookupExprVisitor exprVisitor(&context);
+                if (exprVisitor.dispatchIfNotNull(conditionalModifier->condition))
+                    return true;
+            }
+            else if (auto techniqueModifier = as<MSLTechniqueModifier>(modifier))
+            {
+                ASTLookupExprVisitor exprVisitor(&context);
+                for (auto condition : techniqueModifier->conditions)
+                {
+                    if (exprVisitor.dispatchIfNotNull(condition))
+                        return true;
+                }
+                for (auto boundValue : techniqueModifier->boundValues)
+                {
+                    if (exprVisitor.dispatchIfNotNull(boundValue))
+                        return true;
+                }
+            }
         }
         if (auto container = as<ContainerDecl>(node))
         {

@@ -22,6 +22,7 @@
 #include "slang-lookup-spirv.h"
 #include "slang-lookup.h"
 #include "slang-rich-diagnostics.h"
+#include "slang-translation-unit.h"
 
 namespace Slang
 {
@@ -1071,6 +1072,116 @@ Expr* SemanticsVisitor::createLookupResultExpr(
     {
         return ConstructLookupResultExpr(lookupResult.item, baseExpr, name, loc, originalExpr);
     }
+}
+
+bool SemanticsVisitor::isMSLPropertyExpr(Expr* expr)
+{
+    auto translationUnit = getShared()->getTranslationUnitRequest();
+    if (!translationUnit || !translationUnit->isMessiahShader)
+        return false;
+
+    if (auto parenExpr = as<ParenExpr>(expr))
+        return isMSLPropertyExpr(parenExpr->base);
+
+    auto declRefExpr = as<DeclRefExpr>(expr);
+    auto propertyDecl = declRefExpr ? as<VarDeclBase>(declRefExpr->declRef.getDecl()) : nullptr;
+    if (propertyDecl && propertyDecl->hasModifier<MSLPropertyModifier>())
+        return true;
+
+    if (declRefExpr && declRefExpr->name && declRefExpr->name->text.startsWith("@_"))
+        return true;
+
+    return declRefExpr && declRefExpr->originalExpr && declRefExpr->originalExpr != expr &&
+           isMSLPropertyExpr(declRefExpr->originalExpr);
+}
+
+bool SemanticsVisitor::containsMSLPropertyExpr(Expr* expr)
+{
+    if (!expr)
+        return false;
+
+    if (isMSLPropertyExpr(expr))
+        return true;
+
+    if (auto parenExpr = as<ParenExpr>(expr))
+        return containsMSLPropertyExpr(parenExpr->base);
+
+    if (auto exprWithArgs = as<ExprWithArgsBase>(expr))
+    {
+        for (auto arg : exprWithArgs->arguments)
+        {
+            if (containsMSLPropertyExpr(arg))
+                return true;
+        }
+    }
+    return false;
+}
+
+// Returns true when `expr` is composed only from MSL properties and compile-time constants.
+bool SemanticsVisitor::isMSLStaticPropertyExpression(Expr* expr)
+{
+    if (isMSLPropertyExpr(expr))
+        return true;
+
+    if (auto parenExpr = as<ParenExpr>(expr))
+        return isMSLStaticPropertyExpression(parenExpr->base);
+
+    if (!containsMSLPropertyExpr(expr) &&
+        tryConstantFoldExpr(SubstExpr<Expr>(expr), ConstantFoldingKind::CompileTime, nullptr))
+        return true;
+
+    auto exprWithArgs = as<ExprWithArgsBase>(expr);
+    if (!exprWithArgs ||
+        !(as<BuiltinOperatorExpr>(expr) ||
+          (as<OperatorExpr>(expr) && !as<SelectExpr>(expr)) || as<TypeCastExpr>(expr)))
+        return false;
+
+    for (auto arg : exprWithArgs->arguments)
+    {
+        if (!isMSLStaticPropertyExpression(arg))
+            return false;
+    }
+    return true;
+}
+
+void SemanticsVisitor::checkMSLPropertyExpression(Expr* expr)
+{
+    if (!containsMSLPropertyExpr(expr))
+        return;
+
+    if (as<SelectExpr>(expr))
+    {
+        getSink()->diagnose(Diagnostics::MslPropertyCannotUseConditionalOperator{.expr = expr});
+        return;
+    }
+
+    auto exprWithArgs = as<ExprWithArgsBase>(expr);
+    if (!exprWithArgs || !(as<OperatorExpr>(expr) || as<TypeCastExpr>(expr)))
+    {
+        getSink()->diagnose(Diagnostics::MslPropertyExpressionMustBeStatic{.expr = expr});
+        return;
+    }
+
+    for (auto arg : exprWithArgs->arguments)
+    {
+        if (!isMSLStaticPropertyExpression(arg))
+        {
+            getSink()->diagnose(Diagnostics::MslPropertyExpressionMustBeStatic{.expr = expr});
+            return;
+        }
+    }
+}
+
+Expr* SemanticsVisitor::coerceToBoolForMSLProperty(
+    CoercionSite site,
+    Expr* expr,
+    DiagnosticSink* sink)
+{
+    return coerce(
+        site,
+        m_astBuilder->getBoolType(),
+        expr,
+        containsMSLPropertyExpr(expr) ? nullptr : sink);
 }
 
 DeclVisibility SemanticsVisitor::getTypeVisibility(Type* type)
@@ -4952,7 +5063,7 @@ Expr* SemanticsExprVisitor::convertToLogicOperatorExpr(InvokeExpr* expr)
             // to handle if this expression doesn't support short-circuiting.
             for (auto& arg : expr->arguments)
             {
-                arg = coerce(CoercionSite::Argument, m_astBuilder->getBoolType(), arg, getSink());
+                arg = coerceToBoolForMSLProperty(CoercionSite::Argument, arg, getSink());
             }
 
             expr->functionExpr = CheckTerm(expr->functionExpr);
@@ -4994,6 +5105,14 @@ Expr* SemanticsExprVisitor::visitInvokeExpr(InvokeExpr* expr)
     {
         arg = CheckExpr(arg);
     }
+
+    if (as<SelectExpr>(expr) && expr->arguments.getCount() > 0)
+    {
+        expr->arguments[0] =
+            coerceToBoolForMSLProperty(CoercionSite::Argument, expr->arguments[0], getSink());
+    }
+
+    checkMSLPropertyExpression(expr);
 
     // if the expression is '&&' or '||', we will convert it
     // to use short-circuit evaluation.
@@ -5283,6 +5402,25 @@ Expr* SemanticsExprVisitor::visitVarExpr(VarExpr* expr)
         if (m_parentLambdaExpr)
             return maybeRegisterLambdaCapture(lookupResultExpr);
         return lookupResultExpr;
+    }
+
+    auto translationUnit = getShared()->getTranslationUnitRequest();
+    if (translationUnit && translationUnit->isMessiahShader && expr->name &&
+        expr->name->text.startsWith("@_"))
+    {
+        auto propertyDecl = m_astBuilder->create<VarDecl>();
+        propertyDecl->loc = expr->loc;
+        propertyDecl->nameAndLoc = NameLoc(expr->name, expr->loc);
+        propertyDecl->type.type = m_astBuilder->getUIntType();
+        propertyDecl->checkState = DeclCheckState::DefinitionChecked;
+        auto propertyModifier = m_astBuilder->create<MSLPropertyModifier>();
+        propertyModifier->isSynthetic = true;
+        addModifier(propertyDecl, propertyModifier);
+        getShared()->getModule()->getModuleDecl()->addMember(propertyDecl);
+
+        expr->declRef = makeDeclRef(propertyDecl);
+        expr->type = QualType(propertyDecl->type.type);
+        return expr;
     }
 
     if (!diagnosed)

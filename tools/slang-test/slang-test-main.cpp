@@ -2536,6 +2536,105 @@ TestResult runLanguageServerTest(TestContext* context, TestInput& input)
                 actualOutputSB << "\ncontent:\n" << hover.contents.value << "\n";
             }
         }
+        else if (line.startsWith("SEMANTIC_TOKENS"))
+        {
+            LanguageServerProtocol::SemanticTokensParams params;
+            params.textDocument.uri = openDocParams.textDocument.uri;
+            if (SLANG_FAILED(connection->sendCall(
+                    LanguageServerProtocol::SemanticTokensParams::methodName,
+                    &params,
+                    JSONValue::makeInt(callId++))))
+            {
+                return TestResult::Fail;
+            }
+            if (SLANG_FAILED(waitForNonDiagnosticResponse()))
+                return TestResult::Fail;
+
+            actualOutputSB << "--------\nlegend:";
+            auto& legend = initResult.capabilities.semanticTokensProvider.legend;
+            for (auto modifier : legend.tokenModifiers)
+                actualOutputSB << " " << modifier;
+            actualOutputSB << "\n";
+
+            LanguageServerProtocol::NullResponse nullResponse;
+            LanguageServerProtocol::SemanticTokens semanticTokens;
+            if (SLANG_SUCCEEDED(connection->getMessage(&nullResponse)))
+            {
+                actualOutputSB << "null\n";
+            }
+            else if (SLANG_SUCCEEDED(connection->getMessage(&semanticTokens)))
+            {
+                uint32_t tokenLine = 0;
+                uint32_t tokenColumn = 0;
+                for (Index tokenIndex = 0;
+                     tokenIndex + 4 < semanticTokens.data.getCount();
+                     tokenIndex += 5)
+                {
+                    auto deltaLine = semanticTokens.data[tokenIndex];
+                    tokenLine += deltaLine;
+                    tokenColumn = deltaLine == 0 ? tokenColumn + semanticTokens.data[tokenIndex + 1]
+                                                 : semanticTokens.data[tokenIndex + 1];
+
+                    auto tokenTypeIndex = semanticTokens.data[tokenIndex + 3];
+                    actualOutputSB << tokenLine << "," << tokenColumn << " ";
+                    if (tokenTypeIndex < legend.tokenTypes.getCount())
+                        actualOutputSB << legend.tokenTypes[tokenTypeIndex];
+                    else
+                        actualOutputSB << "<invalid>";
+
+                    auto modifierMask = semanticTokens.data[tokenIndex + 4];
+                    for (Index modifierIndex = 0; modifierIndex < legend.tokenModifiers.getCount();
+                         ++modifierIndex)
+                    {
+                        if (modifierMask & (1u << modifierIndex))
+                            actualOutputSB << " " << legend.tokenModifiers[modifierIndex];
+                    }
+                    actualOutputSB << "\n";
+                }
+            }
+        }
+        else if (line.startsWith("DOCUMENT_SYMBOLS"))
+        {
+            LanguageServerProtocol::DocumentSymbolParams params;
+            params.textDocument.uri = openDocParams.textDocument.uri;
+            if (SLANG_FAILED(connection->sendCall(
+                    LanguageServerProtocol::DocumentSymbolParams::methodName,
+                    &params,
+                    JSONValue::makeInt(callId++))))
+            {
+                return TestResult::Fail;
+            }
+            if (SLANG_FAILED(waitForNonDiagnosticResponse()))
+                return TestResult::Fail;
+
+            actualOutputSB << "--------\n";
+            LanguageServerProtocol::NullResponse nullResponse;
+            List<LanguageServerProtocol::DocumentSymbol> symbols;
+            if (SLANG_SUCCEEDED(connection->getMessage(&nullResponse)))
+            {
+                actualOutputSB << "null\n";
+            }
+            else if (SLANG_SUCCEEDED(connection->getMessage(&symbols)))
+            {
+                auto writeSymbols = [&](auto&& self,
+                                        const List<LanguageServerProtocol::DocumentSymbol>& items,
+                                        int depth) -> void
+                {
+                    for (const auto& symbol : items)
+                    {
+                        for (int i = 0; i < depth; ++i)
+                            actualOutputSB << "  ";
+                        actualOutputSB << symbol.name << ": " << int(symbol.kind);
+                        if (symbol.detail.getLength())
+                            actualOutputSB << " " << symbol.detail;
+                        actualOutputSB << " @" << symbol.selectionRange.start.line + 1;
+                        actualOutputSB << "\n";
+                        self(self, symbol.children, depth + 1);
+                    }
+                };
+                writeSymbols(writeSymbols, symbols, 0);
+            }
+        }
         else if (line.startsWith("DIAGNOSTICS"))
         {
             if (!diagnosticsReceived)
@@ -5241,9 +5340,9 @@ static SlangResult _runTestsOnFile(TestContext* context, String filePath)
 static bool endsWithAllowedExtension(TestContext* /*context*/, String filePath)
 {
     char const* allowedExtensions[] = {
-        ".slang.md", ".slang", ".hlsl", ".fx",   ".glsl",     ".vert", ".frag",
-        ".geom",     ".tesc",  ".tese", ".comp", ".internal", ".ahit", ".chit",
-        ".miss",     ".rgen",  ".c",    ".cpp",  ".cu",
+        ".slang.md", ".slang", ".hlsl", ".fx",   ".fxt",      ".glsl", ".vert",
+        ".frag",     ".geom",  ".tesc", ".tese", ".comp",     ".internal", ".ahit",
+        ".chit",     ".miss",  ".rgen", ".c",    ".cpp",      ".cu",
     };
 
     for (auto allowedExtension : allowedExtensions)

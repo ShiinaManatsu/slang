@@ -1,0 +1,15 @@
+//TEST:LANG_SERVER(filecheck=CHECK):
+
+@_TemplateFeature
+{
+    Name = TemplateFeature;
+    Default = true;
+}
+
+cbuffer Shader
+{
+    float3 TemplateColor <Visible = "false";> = {1.0, 0.5, 0.25};
+}
+
+//HOVER:11,12
+// CHECK: TemplateColor

@@ -2094,6 +2094,11 @@ static TokenType _lexTokenImpl(Lexer* lexer)
         return TokenType::QuestionMark;
     case '@':
         _advance(lexer);
+        if (_peek(lexer) == '_')
+        {
+            _lexIdentifier(lexer);
+            return TokenType::MSLPropertyIdentifier;
+        }
         return TokenType::At;
     case '$':
         {
@@ -2258,7 +2263,9 @@ Token Lexer::lexToken()
 
         if (m_namePool)
         {
-            if (tokenType == TokenType::Identifier || tokenType == TokenType::CompletionRequest)
+            if (tokenType == TokenType::Identifier ||
+                tokenType == TokenType::MSLPropertyIdentifier ||
+                tokenType == TokenType::CompletionRequest)
             {
                 token.setName(m_namePool->getName(token.getContent()));
             }

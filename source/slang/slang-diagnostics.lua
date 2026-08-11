@@ -1679,6 +1679,20 @@ warning(
     span { loc = "expr:Expr", message = "implicit float-to-double conversion may cause unexpected performance issues, use explicit cast if intended." }
 )
 
+err(
+    "msl-property-cannot-use-conditional-operator",
+    30087,
+    "MSL property cannot use `?:`",
+    span { loc = "expr:Expr", message = "MSL property expressions cannot use the `?:` operator" }
+)
+
+err(
+    "msl-property-expression-must-be-static",
+    30088,
+    "MSL property expression must be static",
+    span { loc = "expr:Expr", message = "MSL property expressions can only combine MSL properties with compile-time constants" }
+)
+
 -- try/throw diagnostics
 
 err(

@@ -1335,13 +1335,25 @@ RefPtr<Module> Linkage::loadSourceModuleImpl(
     translationUnit->setModuleName(name);
     Stage impliedStage;
     translationUnit->sourceLanguage = SourceLanguage::Slang;
+    const auto sourceFileName = filePathInfo.getName().getUnownedSlice();
+    const bool isMessiahShader =
+        sourceFileName.endsWithCaseInsensitive(".fx") ||
+        sourceFileName.endsWithCaseInsensitive(".fxh") ||
+        sourceFileName.endsWithCaseInsensitive(".fxt");
+    translationUnit->isMessiahShader = isMessiahShader;
 
-    // If we are loading from a file with apparaent glsl extension,
-    // set the source language to GLSL to enable GLSL compatibility mode.
-    if ((SourceLanguage)findSourceLanguageFromPath(filePathInfo.getName(), impliedStage) ==
-        SourceLanguage::GLSL)
+    // Select the compatibility frontend from the source path. The language
+    // server loads documents through this path, so HLSL would otherwise fall
+    // back to Slang mode even when the client supplied an HLSL document.
+    auto sourceLanguage =
+        (SourceLanguage)findSourceLanguageFromPath(filePathInfo.getName(), impliedStage);
+    if (sourceLanguage == SourceLanguage::HLSL || sourceLanguage == SourceLanguage::GLSL)
     {
-        translationUnit->sourceLanguage = SourceLanguage::GLSL;
+        translationUnit->sourceLanguage = sourceLanguage;
+    }
+    else if (isMessiahShader || sourceFileName.endsWithCaseInsensitive(".hlsli"))
+    {
+        translationUnit->sourceLanguage = SourceLanguage::HLSL;
     }
 
     frontEndReq->addTranslationUnit(translationUnit);
@@ -1373,6 +1385,38 @@ RefPtr<Module> Linkage::loadSourceModuleImpl(
     else
     {
         return nullptr;
+    }
+
+    if (isMessiahShader)
+    {
+        static const char kMessiahPropertyPrelude[] = R"(
+typedef uint MSLProperty;
+typedef Texture2D texture2D;
+typedef Texture2DArray texture2DArray;
+typedef Texture1D texture1D;
+typedef Texture3D texture3D;
+typedef TextureCube textureCube;
+typedef TextureCubeArray textureCubeArray;
+typedef SamplerState sampler;
+typedef SamplerState sampler1D;
+typedef SamplerState sampler2D;
+typedef SamplerState sampler3D;
+typedef SamplerState samplerCUBE;
+typedef SamplerState samplerCube;
+typedef SamplerState sampler_state;
+typedef SamplerState samplerstate;
+typedef SamplerComparisonState samplercomparisonstate;
+)";
+
+        translationUnit->preprocessorDefinitions.add("layout", "register");
+
+        auto preludeBlob =
+            StringBlob::create(UnownedStringSlice::fromLiteral(kMessiahPropertyPrelude));
+        auto preludeArtifact = ArtifactUtil::createArtifact(
+            ArtifactDesc::make(ArtifactKind::Source, ArtifactPayload::HLSL, ArtifactStyle::Unknown),
+            "__messiah_property_prelude.hlsl");
+        preludeArtifact->addRepresentationUnknown(preludeBlob);
+        translationUnit->addSourceArtifact(preludeArtifact);
     }
 
     translationUnit->addSourceArtifact(sourceArtifact);

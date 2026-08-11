@@ -263,7 +263,7 @@ Expr* SemanticsVisitor::checkPredicateExpr(Expr* expr)
     Expr* e = expr;
     e = CheckTerm(e);
     e = maybeRegisterLambdaCapture(e);
-    e = coerce(CoercionSite::General, m_astBuilder->getBoolType(), e, getSink());
+    e = coerceToBoolForMSLProperty(CoercionSite::General, e, getSink());
     return e;
 }
 

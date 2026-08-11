@@ -25,12 +25,27 @@ enum class SemanticTokenType
 };
 extern const char* kSemanticTokenTypes[(int)SemanticTokenType::NormalText];
 
+enum class SemanticTokenModifier
+{
+    Global,
+    Local,
+    Field,
+    Count,
+};
+extern const char* kSemanticTokenModifiers[(int)SemanticTokenModifier::Count];
+
+inline uint32_t getSemanticTokenModifierMask(SemanticTokenModifier modifier)
+{
+    return 1u << uint32_t(modifier);
+}
+
 struct SemanticToken
 {
     int line;
     int col;
     int length;
     SemanticTokenType type;
+    uint32_t modifiers = 0;
     bool operator<(const SemanticToken& other) const
     {
         if (line < other.line)

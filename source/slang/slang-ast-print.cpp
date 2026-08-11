@@ -1251,10 +1251,20 @@ void ASTPrinter::addVal(Val* val)
     {
         out << "subscript";
     }
+    else if (auto techniqueModifier = decl->findModifier<MSLTechniqueModifier>())
+    {
+        auto text = techniqueModifier->nameToken.getContent();
+        if (text.getLength())
+            out << text;
+        else
+            out << getText(decl->getName());
+    }
     else
     {
         auto text = getText(decl->getName());
-        if (text.getLength() && !(CharUtil::isAlphaOrDigit(text[0]) || text[0] == '_'))
+        if (decl->hasModifier<MSLPropertyModifier>())
+            out << text;
+        else if (text.getLength() && !(CharUtil::isAlphaOrDigit(text[0]) || text[0] == '_'))
             out << "operator" << text;
         else
             out << text;
@@ -1703,6 +1713,10 @@ void ASTPrinter::addDeclKindPrefix(Decl* decl)
     else if (const auto propertyDecl = as<PropertyDecl>(decl); propertyDecl)
     {
         m_builder << "property ";
+    }
+    else if (decl->hasModifier<MSLTechniqueModifier>())
+    {
+        m_builder << "technique ";
     }
     else if (as<NamespaceDecl>(decl))
     {

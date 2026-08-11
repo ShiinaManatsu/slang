@@ -93,6 +93,7 @@ struct ParserOptions
 {
     bool enableEffectAnnotations = false;
     bool allowGLSLInput = false;
+    bool allowMSLPropertyInput = false;
     bool isInLanguageServer = false;
     ParsingStage stage = ParsingStage::Body;
     CompilerOptionSet optionSet;
@@ -298,6 +299,8 @@ static void _parseOptSemantics(Parser* parser, Decl* decl);
 static DeclBase* ParseDecl(Parser* parser, ContainerDecl* containerDecl);
 
 static Decl* ParseSingleDecl(Parser* parser, ContainerDecl* containerDecl);
+
+static MSLTechniqueModifier* parseMSLStateBlock(Parser* parser);
 
 static void parseModernParamList(Parser* parser, CallableDecl* decl);
 
@@ -983,6 +986,33 @@ static Token parseAttributeName(Parser* parser, Token& outOriginalLastToken)
     return token;
 }
 
+static bool _hasMSLPropertyInSquareBrackets(Parser* parser)
+{
+    if (!parser->options.allowMSLPropertyInput)
+        return false;
+
+    TokenReader reader = parser->tokenReader;
+    SLANG_ASSERT(reader.peekTokenType() == TokenType::LBracket);
+    reader.advanceToken();
+    while (reader.peekTokenType() != TokenType::RBracket && !reader.isAtEnd())
+    {
+        if (reader.peekTokenType() == TokenType::MSLPropertyIdentifier)
+            return true;
+        SkipBalancedToken(&reader);
+    }
+    return false;
+}
+
+static void parseMSLConditionalModifier(Parser* parser, Modifier*** ioModifierLink)
+{
+    auto openBracket = parser->ReadToken(TokenType::LBracket);
+    auto modifier = parser->astBuilder->create<MSLConditionalModifier>();
+    modifier->loc = openBracket.loc;
+    modifier->condition = parser->ParseExpression();
+    parser->ReadToken(TokenType::RBracket);
+    AddModifier(ioModifierLink, modifier);
+}
+
 // Parse HLSL-style `[name(arg, ...)]` style "attribute" modifiers
 static void ParseSquareBracketAttributes(Parser* parser, Modifier*** ioModifierLink)
 {
@@ -1289,7 +1319,10 @@ static Modifiers ParseModifiers(Parser* parser, LookupMask modifierLookupMask = 
         // HLSL uses `[attributeName]` style for its modifiers, which closely
         // matches the C++ `[[attributeName]]` style.
         case TokenType::LBracket:
-            ParseSquareBracketAttributes(parser, &modifierLink);
+            if (_hasMSLPropertyInSquareBrackets(parser))
+                parseMSLConditionalModifier(parser, &modifierLink);
+            else
+                ParseSquareBracketAttributes(parser, &modifierLink);
             break;
         }
     }
@@ -3560,6 +3593,42 @@ static TypeSpec _parseTypeSpec(Parser* parser)
     return typeSpec;
 }
 
+static bool isMSLResourceTypeExpr(Expr* typeExpr)
+{
+    if (auto genericAppExpr = as<GenericAppExpr>(typeExpr))
+        typeExpr = genericAppExpr->functionExpr;
+
+    auto typeNameExpr = as<VarExpr>(typeExpr);
+    if (!typeNameExpr)
+        return false;
+
+    const auto typeName = getText(typeNameExpr->name);
+    const char* const resourceTypeNames[] = {
+        "Texture1D",
+        "Texture2D",
+        "Texture2DArray",
+        "Texture3D",
+        "TextureCube",
+        "texture2D",
+        "texture2DArray",
+        "texture3D",
+        "textureCube",
+        "sampler",
+        "sampler_state",
+        "samplerstate",
+        "samplercomparisonstate",
+        "SamplerState",
+        "SamplerComparisonState",
+        "SubpassInput",
+    };
+    for (auto resourceTypeName : resourceTypeNames)
+    {
+        if (typeName == resourceTypeName)
+            return true;
+    }
+    return false;
+}
+
 
 static DeclBase* ParseDeclaratorDecl(
     Parser* parser,
@@ -3690,10 +3759,30 @@ static DeclBase* ParseDeclaratorDecl(
 
     // Otherwise we are looking at a variable declaration, which could be one in a sequence...
 
+    if (parser->options.allowMSLPropertyInput && parser->LookAheadToken(TokenType::LBrace))
+    {
+        auto stateModifier = parseMSLStateBlock(parser);
+        AdvanceIf(parser, TokenType::Semicolon);
+
+        UnwrapDeclarator(parser->astBuilder, initDeclarator, &declaratorInfo);
+        VarDeclBase* firstDecl = CreateVarDeclForContext(parser->astBuilder, containerDecl);
+        CompleteVarDecl(parser, firstDecl, declaratorInfo);
+        addModifier(firstDecl, stateModifier);
+
+        declGroupBuilder.addDecl(firstDecl);
+        return declGroupBuilder.getResult();
+    }
+
     if (AdvanceIf(parser, TokenType::Semicolon))
     {
         // easy case: we only had a single declaration!
         UnwrapDeclarator(parser->astBuilder, initDeclarator, &declaratorInfo);
+        if (parser->options.allowMSLPropertyInput &&
+            isMSLResourceTypeExpr(declaratorInfo.typeSpec) &&
+            as<StringLiteralExpr>(declaratorInfo.initializer))
+        {
+            declaratorInfo.initializer = nullptr;
+        }
         VarDeclBase* firstDecl = CreateVarDeclForContext(parser->astBuilder, containerDecl);
         CompleteVarDecl(parser, firstDecl, declaratorInfo);
 
@@ -5789,6 +5878,205 @@ static void CompleteDecl(
     }
 }
 
+static VarDecl* parseMSLPropertyDecl(Parser* parser)
+{
+    auto propertyName = parser->ReadToken(TokenType::MSLPropertyIdentifier);
+
+    auto propertyDecl = parser->astBuilder->create<VarDecl>();
+    propertyDecl->loc = propertyName.loc;
+    propertyDecl->nameAndLoc = NameLoc(propertyName);
+
+    auto propertyType = parser->astBuilder->create<VarExpr>();
+    propertyType->loc = propertyName.loc;
+    propertyType->scope = parser->currentScope;
+    propertyType->name = getName(parser, "MSLProperty");
+    propertyDecl->type = TypeExp(propertyType);
+
+    auto propertyModifier = parser->astBuilder->create<MSLPropertyModifier>();
+    propertyModifier->loc = propertyName.loc;
+    addModifier(propertyDecl, propertyModifier);
+
+    if (AdvanceIf(parser, TokenType::Colon))
+    {
+        propertyModifier->valueCountToken = parser->ReadToken(TokenType::IntegerLiteral);
+    }
+
+    if (parser->LookAheadToken(TokenType::LBrace))
+    {
+        parser->ReadToken(TokenType::LBrace);
+        while (!parser->LookAheadToken(TokenType::RBrace) && !parser->tokenReader.isAtEnd())
+        {
+            propertyModifier->metadataTokens.add(parser->ReadToken());
+        }
+        parser->ReadToken(TokenType::RBrace);
+    }
+
+    AdvanceIf(parser, TokenType::Semicolon);
+    return propertyDecl;
+}
+
+static void appendMSLConditionalModifiers(
+    Modifiers& modifiers,
+    MSLTechniqueModifier* stateModifier)
+{
+    for (auto modifier : modifiers)
+    {
+        if (auto conditionalModifier = as<MSLConditionalModifier>(modifier))
+            stateModifier->conditions.add(conditionalModifier->condition);
+    }
+}
+
+static bool isMSLSymbolBindingState(const Token& nameToken)
+{
+    const auto name = nameToken.getContent();
+    return name == "Texture" || name == "VertexShader" || name == "PixelShader" ||
+           name == "GeometryShader" || name == "HullShader" || name == "DomainShader" ||
+           name == "ComputeShader";
+}
+
+static bool isMSLShaderState(const Token& nameToken)
+{
+    const auto name = nameToken.getContent();
+    return name == "VertexShader" || name == "PixelShader" || name == "GeometryShader" ||
+           name == "HullShader" || name == "DomainShader" || name == "ComputeShader";
+}
+
+static Expr* getMSLStateBindingValue(const Token& nameToken, Expr* value)
+{
+    if (isMSLShaderState(nameToken))
+    {
+        if (auto invokeExpr = as<InvokeExpr>(value))
+        {
+            if (invokeExpr->arguments.getCount() == 0)
+                return invokeExpr->functionExpr;
+        }
+    }
+    return value;
+}
+
+static void parseMSLStateAssignment(Parser* parser, MSLTechniqueModifier* stateModifier)
+{
+    auto modifiers = ParseModifiers(parser);
+    appendMSLConditionalModifiers(modifiers, stateModifier);
+
+    if (!parser->LookAheadToken(TokenType::Identifier))
+    {
+        SkipBalancedToken(&parser->tokenReader);
+        return;
+    }
+
+    auto nameToken = parser->ReadToken(TokenType::Identifier);
+    if (!AdvanceIf(parser, TokenType::OpAssign))
+    {
+        return;
+    }
+
+    auto value = parser->ParseInitExpr();
+    if (isMSLSymbolBindingState(nameToken))
+        stateModifier->boundValues.add(getMSLStateBindingValue(nameToken, value));
+
+    parser->ReadToken(TokenType::Semicolon);
+}
+
+static MSLTechniqueModifier* parseMSLStateBlock(Parser* parser)
+{
+    auto stateModifier = parser->astBuilder->create<MSLTechniqueModifier>();
+    stateModifier->loc = parser->ReadToken(TokenType::LBrace).loc;
+
+    while (!parser->LookAheadToken(TokenType::RBrace) && !parser->tokenReader.isAtEnd())
+    {
+        parseMSLStateAssignment(parser, stateModifier);
+    }
+
+    parser->ReadToken(TokenType::RBrace);
+    return stateModifier;
+}
+
+static NamespaceDecl* parseMSLTechniqueDecl(Parser* parser)
+{
+    auto techniqueKeyword = parser->ReadToken();
+    auto techniqueDecl = parser->astBuilder->create<NamespaceDecl>();
+    techniqueDecl->loc = techniqueKeyword.loc;
+    auto stateModifier = parser->astBuilder->create<MSLTechniqueModifier>();
+    addModifier(techniqueDecl, stateModifier);
+
+    if (parser->LookAheadToken(TokenType::Identifier))
+    {
+        auto techniqueName = parser->ReadToken(TokenType::Identifier);
+        stateModifier->nameToken = techniqueName;
+
+        StringBuilder uniqueName;
+        uniqueName << "__msl_technique_" << techniqueName.getContent() << "_"
+                   << techniqueName.loc.getRaw();
+        techniqueDecl->nameAndLoc =
+            NameLoc(getName(parser, uniqueName.produceString()), techniqueName.loc);
+    }
+
+    if (parser->LookAheadToken(TokenType::OpLess))
+    {
+        parser->ReadToken(TokenType::OpLess);
+        while (!parser->LookAheadToken(TokenType::OpGreater) && !parser->tokenReader.isAtEnd())
+        {
+            SkipBalancedToken(&parser->tokenReader);
+        }
+        parser->ReadToken(TokenType::OpGreater);
+    }
+
+    if (parser->LookAheadToken(TokenType::LBrace))
+    {
+        parser->ReadToken(TokenType::LBrace);
+        while (!parser->LookAheadToken(TokenType::RBrace) && !parser->tokenReader.isAtEnd())
+        {
+            auto modifiers = ParseModifiers(parser);
+            appendMSLConditionalModifiers(modifiers, stateModifier);
+
+            if (AdvanceIf(parser, "pass"))
+            {
+                if (parser->LookAheadToken(TokenType::Identifier))
+                    parser->ReadToken(TokenType::Identifier);
+                if (parser->LookAheadToken(TokenType::OpLess))
+                {
+                    parser->ReadToken(TokenType::OpLess);
+                    while (!parser->LookAheadToken(TokenType::OpGreater) &&
+                           !parser->tokenReader.isAtEnd())
+                    {
+                        SkipBalancedToken(&parser->tokenReader);
+                    }
+                    parser->ReadToken(TokenType::OpGreater);
+                }
+                if (parser->LookAheadToken(TokenType::LBrace))
+                {
+                    auto passStateModifier = parseMSLStateBlock(parser);
+                    stateModifier->conditions.addRange(passStateModifier->conditions);
+                    stateModifier->boundValues.addRange(passStateModifier->boundValues);
+                }
+            }
+            else
+            {
+                if (parser->LookAheadToken(TokenType::Identifier))
+                {
+                    auto nameToken = parser->ReadToken(TokenType::Identifier);
+                    if (AdvanceIf(parser, TokenType::OpAssign))
+                    {
+                        auto value = parser->ParseInitExpr();
+                        if (isMSLSymbolBindingState(nameToken))
+                            stateModifier->boundValues.add(getMSLStateBindingValue(nameToken, value));
+                        parser->ReadToken(TokenType::Semicolon);
+                    }
+                }
+                else
+                {
+                    SkipBalancedToken(&parser->tokenReader);
+                }
+            }
+        }
+        techniqueDecl->closingSourceLoc = parser->ReadToken(TokenType::RBrace).loc;
+    }
+
+    AdvanceIf(parser, TokenType::Semicolon);
+    return techniqueDecl;
+}
+
 static DeclBase* ParseDeclWithModifiers(
     Parser* parser,
     ContainerDecl* containerDecl,
@@ -5811,6 +6099,14 @@ static DeclBase* ParseDeclWithModifiers(
     {
     case TokenType::Identifier:
         {
+            if (parser->options.allowMSLPropertyInput &&
+                (parser->LookAheadToken("technique") || parser->LookAheadToken("technique10") ||
+                 parser->LookAheadToken("technique11")))
+            {
+                decl = parseMSLTechniqueDecl(parser);
+                break;
+            }
+
             // A declaration that starts with an identifier might be:
             //
             // - A keyword-based declaration (e.g., `cbuffer ...`)
@@ -5932,6 +6228,13 @@ static DeclBase* ParseDeclWithModifiers(
             }
         }
         break;
+    case TokenType::MSLPropertyIdentifier:
+        if (parser->options.allowMSLPropertyInput)
+        {
+            decl = parseMSLPropertyDecl(parser);
+            break;
+        }
+        [[fallthrough]];
     // If nothing else matched, we try to parse an "ordinary" declarator-based declaration
     default:
         decl = ParseDeclaratorDecl(parser, containerDecl, modifiers);
@@ -9296,6 +9599,21 @@ static Expr* parseAtomicExpr(Parser* parser)
 
             return varExpr;
         }
+    case TokenType::MSLPropertyIdentifier:
+        {
+            if (parser->options.allowMSLPropertyInput)
+            {
+                auto propertyExpr = parser->astBuilder->create<VarExpr>();
+                propertyExpr->scope = parser->currentScope;
+                parser->FillPosition(propertyExpr);
+
+                auto propertyName = parser->ReadToken(TokenType::MSLPropertyIdentifier);
+                propertyExpr->name = propertyName.getName();
+                return propertyExpr;
+            }
+            parser->diagnose(Diagnostics::SyntaxError{.location = parser->tokenReader.peekLoc()});
+            return parser->astBuilder->create<IncompleteExpr>();
+        }
     }
 }
 
@@ -10161,11 +10479,14 @@ Stmt* parseUnparsedStmt(
 {
     ParserOptions options = {};
     options.stage = ParsingStage::Body;
-    options.enableEffectAnnotations = translationUnit->compileRequest->optionSet.getBoolOption(
-        CompilerOptionName::EnableEffectAnnotations);
+    options.enableEffectAnnotations =
+        translationUnit->isMessiahShader ||
+        translationUnit->compileRequest->optionSet.getBoolOption(
+            CompilerOptionName::EnableEffectAnnotations);
     options.allowGLSLInput =
         translationUnit->compileRequest->optionSet.getBoolOption(CompilerOptionName::AllowGLSL) ||
         sourceLanguage == SourceLanguage::GLSL;
+    options.allowMSLPropertyInput = translationUnit->isMessiahShader;
     options.isInLanguageServer =
         translationUnit->compileRequest->getLinkage()->isInLanguageServer();
     options.optionSet = translationUnit->compileRequest->optionSet;
@@ -10192,11 +10513,14 @@ void parseSourceFile(
 {
     ParserOptions options = {};
     options.stage = ParsingStage::Decl;
-    options.enableEffectAnnotations = translationUnit->compileRequest->optionSet.getBoolOption(
-        CompilerOptionName::EnableEffectAnnotations);
+    options.enableEffectAnnotations =
+        translationUnit->isMessiahShader ||
+        translationUnit->compileRequest->optionSet.getBoolOption(
+            CompilerOptionName::EnableEffectAnnotations);
     options.allowGLSLInput =
         translationUnit->compileRequest->optionSet.getBoolOption(CompilerOptionName::AllowGLSL) ||
         sourceLanguage == SourceLanguage::GLSL;
+    options.allowMSLPropertyInput = translationUnit->isMessiahShader;
     options.isInLanguageServer =
         translationUnit->compileRequest->getLinkage()->isInLanguageServer();
     options.optionSet = translationUnit->compileRequest->optionSet;

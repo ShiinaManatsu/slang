@@ -568,6 +568,31 @@ class GLSLExtensionDirective : public GLSLPreprocessorDirective
 };
 
 FIDDLE()
+class MSLPropertyModifier : public Modifier
+{
+    FIDDLE(...)
+    FIDDLE() Token valueCountToken;
+    FIDDLE() List<Token> metadataTokens;
+    FIDDLE() bool isSynthetic = false;
+};
+
+FIDDLE()
+class MSLConditionalModifier : public Modifier
+{
+    FIDDLE(...)
+    FIDDLE() Expr* condition = nullptr;
+};
+
+FIDDLE()
+class MSLTechniqueModifier : public Modifier
+{
+    FIDDLE(...)
+    FIDDLE() Token nameToken;
+    FIDDLE() List<Expr*> conditions;
+    FIDDLE() List<Expr*> boundValues;
+};
+
+FIDDLE()
 class ParameterGroupReflectionName : public Modifier
 {
     FIDDLE(...)
