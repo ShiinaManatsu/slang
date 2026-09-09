@@ -3898,6 +3898,13 @@ err(
     span { loc = "expr:Expr", message = "'~type:Type' is a resource or opaque type and cannot be used as the value type of 'Optional<T>'." }
 )
 
+err(
+    "msl-property-not-defined",
+    30903,
+    "MSL property is not defined",
+    span { loc = "location", message = "MSL property '~name:Name' is neither declared in this shader nor in the engine property list" }
+)
+
 -- Load semantic checking diagnostics (part 8) - Accessors, Bit Fields, Integer Constants, Overloads, Switch, Generics, Ambiguity
 -- (inlined from slang-diagnostics-semantic-checking-8.lua)
 

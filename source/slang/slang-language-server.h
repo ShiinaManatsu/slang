@@ -252,6 +252,7 @@ private:
     void resetDiagnosticUpdateTime();
     void publishDiagnostics();
     void updatePredefinedMacros(const JSONValue& macros);
+    void updateMSLProperties(const JSONValue& value);
     void updateSearchPaths(const JSONValue& value);
     void updateSearchInWorkspace(const JSONValue& value);
     void updateCommitCharacters(const JSONValue& value);

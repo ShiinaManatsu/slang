@@ -104,6 +104,13 @@ public:
 
     CompilerOptionSet m_optionSet;
 
+    // Names of MSL properties (`@_Name`) that the engine defines on the C++ side,
+    // supplied by the language client via the `slang.mslProperties` setting.
+    // An empty list keeps the tolerant behavior (any `@_Name` resolves to a
+    // synthetic property); a non-empty list turns unknown `@_Name` references
+    // into diagnostics so typos are caught.
+    List<String> mslPredefinedPropertyNames;
+
     ISlangUnknown* getInterface(const Guid& guid);
 
     SLANG_NO_THROW slang::IGlobalSession* SLANG_MCALL getGlobalSession() override;

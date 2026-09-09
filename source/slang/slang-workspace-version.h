@@ -171,6 +171,7 @@ public:
     List<String> additionalSearchPaths;
     OrderedHashSet<String> workspaceSearchPaths;
     List<OwnedPreprocessorMacroDefinition> predefinedMacros;
+    List<String> predefinedMSLProperties;
     bool searchInWorkspace = true;
     WorkspaceFlavor workspaceFlavor = WorkspaceFlavor::Standard;
 
@@ -191,6 +192,7 @@ public:
     // Update predefined macro settings. Returns true if the new settings are different from
     // existing ones.
     bool updatePredefinedMacros(List<String> predefinedMacros);
+    bool updatePredefinedMSLProperties(List<String> mslProperties);
     bool updateSearchPaths(List<String> searchPaths);
     bool updateSearchInWorkspace(bool value);
     bool updatePredefinedLanguageVersion(SlangLanguageVersion version);

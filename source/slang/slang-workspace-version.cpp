@@ -118,6 +118,30 @@ bool Workspace::updatePredefinedMacros(List<String> macros)
     return changed;
 }
 
+bool Workspace::updatePredefinedMSLProperties(List<String> mslProperties)
+{
+    bool changed = false;
+    if (mslProperties.getCount() != predefinedMSLProperties.getCount())
+        changed = true;
+    else
+    {
+        for (Index i = 0; i < mslProperties.getCount(); i++)
+        {
+            if (mslProperties[i] != predefinedMSLProperties[i])
+            {
+                changed = true;
+                break;
+            }
+        }
+    }
+    if (changed)
+    {
+        predefinedMSLProperties = _Move(mslProperties);
+        invalidate();
+    }
+    return changed;
+}
+
 bool Workspace::updateSearchPaths(List<String> paths)
 {
     bool changed = false;
@@ -549,6 +573,7 @@ RefPtr<WorkspaceVersion> Workspace::createWorkspaceVersion()
     ComPtr<Linkage> linkage;
     session->queryInterface(Linkage::getTypeGuid(), (void**)linkage.writeRef());
     version->linkage = linkage.get();
+    version->linkage->mslPredefinedPropertyNames = predefinedMSLProperties;
     version->linkage->contentAssistInfo.checkingMode = ContentAssistCheckingMode::General;
     return version;
 }

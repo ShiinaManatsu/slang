@@ -5487,9 +5487,26 @@ Expr* SemanticsExprVisitor::visitVarExpr(VarExpr* expr)
     if (translationUnit && translationUnit->isMessiahShader && expr->name &&
         expr->name->text.startsWith("@_"))
     {
+        // Engine MSL properties (`@_Name` defined on the engine's C++ side) have no
+        // shader declaration to look up. Resolve them to a synthetic property decl
+        // whose location is deliberately invalid: it must never surface in document
+        // symbols, where a top-level single-line sibling inside an enclosing function
+        // breaks VS Code's sticky-scroll outline model. When the client supplies the
+        // engine property list (`slang.mslProperties`), unknown names are diagnosed so
+        // typos are caught; with no list configured every name stays tolerated.
+        auto linkage = getShared()->getLinkage();
+        if (linkage->mslPredefinedPropertyNames.getCount() != 0 &&
+            !linkage->mslPredefinedPropertyNames.contains(expr->name->text))
+        {
+            getSink()->diagnose(Diagnostics::MslPropertyNotDefined{
+                .name = expr->name,
+                .location = expr->loc,
+            });
+        }
+
         auto propertyDecl = m_astBuilder->create<VarDecl>();
-        propertyDecl->loc = expr->loc;
-        propertyDecl->nameAndLoc = NameLoc(expr->name, expr->loc);
+        propertyDecl->loc = SourceLoc();
+        propertyDecl->nameAndLoc = NameLoc(expr->name, SourceLoc());
         propertyDecl->type.type = m_astBuilder->getUIntType();
         propertyDecl->checkState = DeclCheckState::DefinitionChecked;
         auto propertyModifier = m_astBuilder->create<MSLPropertyModifier>();

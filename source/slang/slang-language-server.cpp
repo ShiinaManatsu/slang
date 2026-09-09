@@ -215,17 +215,18 @@ SlangResult LanguageServer::parseNextMessage()
                 if (response.result.getKind() == JSONValue::Kind::Array)
                 {
                     auto arr = m_connection->getContainer()->getArray(response.result);
-                    if (arr.getCount() == 15)
+                    if (arr.getCount() == 16)
                     {
                         updatePredefinedMacros(arr[0]);
-                        updateSearchPaths(arr[1]);
-                        updateSearchInWorkspace(arr[2]);
-                        updateCommitCharacters(arr[3]);
-                        updateFormattingOptions(arr[4], arr[5], arr[6], arr[7], arr[8], arr[9]);
-                        updateInlayHintOptions(arr[10], arr[11]);
-                        updateWorkspaceFlavor(arr[12]);
-                        updateTraceOptions(arr[13]);
-                        updatePredefinedLanguageVersion(arr[14]);
+                        updateMSLProperties(arr[1]);
+                        updateSearchPaths(arr[2]);
+                        updateSearchInWorkspace(arr[3]);
+                        updateCommitCharacters(arr[4]);
+                        updateFormattingOptions(arr[5], arr[6], arr[7], arr[8], arr[9], arr[10]);
+                        updateInlayHintOptions(arr[11], arr[12]);
+                        updateWorkspaceFlavor(arr[13]);
+                        updateTraceOptions(arr[14]);
+                        updatePredefinedLanguageVersion(arr[15]);
                     }
                 }
                 break;
@@ -2502,6 +2503,31 @@ void LanguageServer::updatePredefinedMacros(const JSONValue& macros)
     }
 }
 
+void LanguageServer::updateMSLProperties(const JSONValue& value)
+{
+    if (value.isValid())
+    {
+        auto container = m_connection->getContainer();
+        JSONToNativeConverter converter(container, &m_typeMap, m_connection->getSink());
+        List<String> mslProperties;
+        if (SLANG_SUCCEEDED(converter.convert(value, &mslProperties)))
+        {
+            // Normalize bare names to their `@_`-prefixed property form so both
+            // "@_Foo" and "Foo" are accepted from the client.
+            for (auto& entry : mslProperties)
+            {
+                entry = entry.trim();
+                if (entry.getLength() != 0 && !entry.startsWith("@_"))
+                    entry = "@_" + entry;
+            }
+            if (m_core.m_workspace->updatePredefinedMSLProperties(mslProperties))
+            {
+                sendRefreshRequests(m_connection);
+            }
+        }
+    }
+}
+
 void LanguageServer::updateSearchPaths(const JSONValue& value)
 {
     if (value.isValid())
@@ -2696,6 +2722,8 @@ void LanguageServer::sendConfigRequest()
     ConfigurationParams args;
     ConfigurationItem item;
     item.section = "slang.predefinedMacros";
+    args.items.add(item);
+    item.section = "slang.mslProperties";
     args.items.add(item);
     item.section = "slang.additionalSearchPaths";
     args.items.add(item);
@@ -3228,6 +3256,10 @@ void LanguageServer::updateConfigFromJSON(const JSONValue& jsonVal)
         if (key == "slang.predefinedMacros")
         {
             updatePredefinedMacros(kv.value);
+        }
+        else if (key == "slang.mslProperties")
+        {
+            updateMSLProperties(kv.value);
         }
         else if (key == "slang.additionalSearchPaths")
         {
