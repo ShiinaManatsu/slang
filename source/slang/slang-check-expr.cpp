@@ -13,6 +13,7 @@
 
 #include "core/slang-char-util.h"
 #include "core/slang-math.h"
+#include "core/slang-short-dictionary.h"
 #include "core/slang-string-util.h"
 #include "slang-ast-decl.h"
 #include "slang-ast-natural-layout.h"
@@ -1221,7 +1222,7 @@ Expr* SemanticsVisitor::coerceToBoolForMSLProperty(
 
 static DeclVisibility _getTypeVisibility(
     Type* type,
-    Dictionary<Type*, DeclVisibility>& typeVisibilityCache)
+    ShortDictionary<Type*, DeclVisibility>& typeVisibilityCache)
 {
     if (auto cachedVisibility = typeVisibilityCache.tryGetValue(type))
         return *cachedVisibility;
@@ -1248,7 +1249,10 @@ static DeclVisibility _getTypeVisibility(
 
 DeclVisibility SemanticsVisitor::getTypeVisibility(Type* type)
 {
-    Dictionary<Type*, DeclVisibility> typeVisibilityCache;
+    // ShortDictionary rather than Dictionary: most types checked here have little or no shared
+    // structure, so the cache typically ends up with only a handful of entries. See the
+    // ShortDictionary doc comment and #12139.
+    ShortDictionary<Type*, DeclVisibility> typeVisibilityCache;
     return _getTypeVisibility(type, typeVisibilityCache);
 }
 
@@ -6467,6 +6471,16 @@ static bool _isSizeOfType(Type* type)
         return false;
     }
 
+    // A `ModifiedType`'s modifiers are layout-transparent, so whether a type has
+    // a size is decided entirely by its base: `sizeof(unorm float4)` is just
+    // `sizeof(float4)`. This matters because the modifier survives into the type
+    // of an ordinary value — loading from a `RWTexture2D<unorm float4>` yields a
+    // `unorm float4` — so rejecting the wrapper here would reject `sizeof` on a
+    // value the user never spelled a modifier on. Unwrapping keeps the list
+    // below about *kinds* of type rather than repeating each kind in a modified
+    // form.
+    type = unwrapModifiedType(type);
+
     if (as<ArithmeticExpressionType>(type) || as<ArrayExpressionType>(type) ||
         as<PtrTypeBase>(type) || as<TupleType>(type) || as<GenericDeclRefType>(type))
     {
@@ -9690,7 +9704,13 @@ Expr* SemanticsExprVisitor::visitSPIRVAsmExpr(SPIRVAsmExpr* expr)
     const auto& spirvInfo = getSession()->spirvCoreGrammarInfo;
 
     // We will iterate over all the operands in all the insts and check
-    // them
+    // them. Setting `failed` makes us return an error-typed expression via
+    // `CreateErrorExpr` at the end of this function; a caller only keeps that
+    // expression away from IR lowering (which aborts on an ErrorType) when the
+    // sink's error count is non-zero. So every site that sets `failed` must
+    // diagnose an *error*, never a warning — a warning-severity `failed` path
+    // is what caused the abort in #12497. (The lone warning in this function,
+    // SpirvLayoutSensitiveTypeInAsm, deliberately does not set `failed`.)
     bool failed = false;
 
     // Track %id's that have been defined in this asm block.
@@ -9705,10 +9725,12 @@ Expr* SemanticsExprVisitor::visitSPIRVAsmExpr(SPIRVAsmExpr* expr)
 
         if (opInfo && opInfo->numOperandTypes == 0 && inst.operands.getCount())
         {
+            // Per the `failed` invariant above, this diagnoses an error (not
+            // the parser's E29106 semicolon-hint warning): the opcode takes no
+            // operands, so this is a definite error rather than a recovery guess.
             failed = true;
-            getSink()->diagnose(Diagnostics::SpirvInstructionWithTooManyOperands{
+            getSink()->diagnose(Diagnostics::SpirvInstructionTakesNoOperands{
                 .opcode = inst.opcode.token.getContent(),
-                .maxOperands = 0,
                 .location = inst.opcode.token.loc});
             continue;
         }
