@@ -2314,7 +2314,7 @@ static Stmt* parseOptBody(Parser* parser)
     }
     Token eofToken;
     eofToken.type = TokenType::EndOfFile;
-    eofToken.loc = parser->tokenReader.peekLoc();
+    eofToken.loc = tokens.getLast().loc;
     tokens.add(eofToken);
     return unparsedStmt;
 }
