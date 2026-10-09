@@ -116,7 +116,7 @@ const required = {
 };
 
 (async () => {
-    const profileHeader = fs.readFileSync(path.join(root, 'source/slang/slang-language-server-hlsl-profile.h'), 'utf8');
+    const profileHeader = fs.readFileSync(path.join(root, 'source/slang/slang-language-server-hlsl-profile.h'), 'utf8').replace(/\r\n/g, '\n');
     const profileBody = /R"profile\(\n([\s\S]*?)\n\)profile"/.exec(profileHeader)?.[1];
     assert.ok(profileBody, 'Missing generated profile');
     const provenance = JSON.parse(fs.readFileSync(path.join(root, 'source/slang/slang-language-server-hlsl-profile.json'), 'utf8'));
