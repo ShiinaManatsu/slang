@@ -8,6 +8,7 @@
 #include "slang-ast-print.h"
 #include "slang-check-impl.h"
 #include "slang-language-server-ast-lookup.h"
+#include "slang-language-server-hlsl-completion.h"
 #include "slang-language-server.h"
 #include "slang-syntax.h"
 
@@ -157,6 +158,8 @@ LanguageServerResult<CompletionResult> CompletionContext::tryCompleteHLSLSemanti
     List<LanguageServerProtocol::CompletionItem> items;
     for (auto name : hlslSemanticNames)
     {
+        if (isHlslCompletion(canonicalPath) && !isHlslCompletionSemantic(name))
+            continue;
         LanguageServerProtocol::CompletionItem item;
         item.label = name;
         item.kind = LanguageServerProtocol::kCompletionItemKindKeyword;
@@ -389,6 +392,8 @@ LanguageServerResult<CompletionResult> CompletionContext::tryCompleteImport()
     }
     return SLANG_FAIL;
 validLine:;
+    if (isHlslCompletion(canonicalPath))
+        return CompletionResult();
     while (pos < lineContent.getLength() && pos < col - 1 &&
            CharUtil::isWhitespace(lineContent[pos]))
         pos++;
@@ -861,6 +866,9 @@ CompletionResult CompletionContext::collectMembersAndSymbols()
             continue;
         if (isMSLPropertyCompletion && !member->hasModifier<MSLPropertyModifier>())
             continue;
+        if (isHlslCompletion(canonicalPath) &&
+            !isHlslCompletionDecl(suggestedItem.declRef, linkage->m_astBuilder))
+            continue;
         LanguageServerProtocol::CompletionItem item;
         int nameStart = 0;
         item.label = formatDeclForCompletion(
@@ -988,6 +996,8 @@ CompletionResult CompletionContext::collectMembersAndSymbols()
         {
             for (auto keyword : kDeclKeywords)
             {
+                if (isHlslCompletion(canonicalPath) && !isHlslCompletionKeyword(keyword))
+                    continue;
                 if (!deduplicateSet.add(keyword))
                     continue;
                 LanguageServerProtocol::CompletionItem item;
@@ -1001,6 +1011,8 @@ CompletionResult CompletionContext::collectMembersAndSymbols()
         {
             for (auto keyword : kStmtKeywords)
             {
+                if (isHlslCompletion(canonicalPath) && !isHlslCompletionKeyword(keyword))
+                    continue;
                 if (!deduplicateSet.add(keyword))
                     continue;
                 LanguageServerProtocol::CompletionItem item;
@@ -1016,6 +1028,9 @@ CompletionResult CompletionContext::collectMembersAndSymbols()
             if (!def.name)
                 continue;
             auto& text = def.name->text;
+            if (isHlslCompletion(canonicalPath) &&
+                (text == "__SLANG__" || text == "__SLANG_COMPILER__" || text == "__HLSL__"))
+                continue;
             if (!deduplicateSet.add(text))
                 continue;
             LanguageServerProtocol::CompletionItem item;
@@ -1191,6 +1206,9 @@ CompletionResult CompletionContext::collectAttributes()
     List<LanguageServerProtocol::CompletionItem> result;
     for (auto& item : version->linkage->contentAssistInfo.completionSuggestions.candidateItems)
     {
+        if (isHlslCompletion(canonicalPath) &&
+            !isHlslCompletionDecl(item.declRef, version->linkage->m_astBuilder))
+            continue;
         if (auto attrDecl = as<AttributeDecl>(item.declRef.getDecl()))
         {
             if (attrDecl->getName())
@@ -1216,8 +1234,11 @@ CompletionResult CompletionContext::collectAttributes()
     }
 
     // Add a suggestion for `[COM]` attribute with generated GUID.
-    auto guidItem = generateGUIDCompletionItem();
-    result.add(guidItem);
+    if (!isHlslCompletion(canonicalPath))
+    {
+        auto guidItem = generateGUIDCompletionItem();
+        result.add(guidItem);
+    }
     return result;
 }
 

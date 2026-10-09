@@ -64,6 +64,8 @@ tools/gfx-unit-test/test-tmp-*
 /tests/**/*.spv-asm
 /tests/**/*.glsl
 /tests/**/*.hlsl
+!/tests/language-server/hlsl-completion-profile.hlsl
+!/tests/language-server/hlsl-completion-resources.hlsl
 /tests/**/*.metal
 /tests/**/*.wgsl
 
